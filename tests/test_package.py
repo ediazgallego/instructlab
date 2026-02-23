@@ -41,35 +41,48 @@ def test_require_no_url_req():
         assert req.url is None, req
 
 
-@pytest.mark.parametrize("hw_extra", sorted(HW_EXTRAS))
-@pytest.mark.parametrize("py_version", ["3.10", "3.11"])
-def test_package_conflict(py_version: str, hw_extra: str) -> None:
-    if py_version != "3.11" and hw_extra == "hpu":
-        pytest.skip("Intel Gaudi only supports 3.11")
+def _build_environment(py_version: str, hw_extra: str | None = None) -> dict[str, str]:
+    """Build environment dictionary for marker evaluation."""
+    env = {
+        "implementation_version": f"{py_version}.0",
+        "python_full_version": f"{py_version}.0",
+        "python_version": py_version,
+    }
+    if hw_extra is not None:
+        env["extra"] = hw_extra
+    return env
 
+
+def _categorize_requirements(
+    py_version: str, hw_extra: str
+) -> tuple[dict[str, Requirement], dict[str, Requirement]]:
+    """Categorize requirements into base and hardware-specific."""
     base: dict[str, Requirement] = {}
     hw: dict[str, Requirement] = {}
+    
+    base_env = _build_environment(py_version)
+    extra_env = _build_environment(py_version, hw_extra)
+    
     for req in iter_requirements():
-        # override version for environment
-        base_env = {
-            "implementation_version": f"{py_version}.0",
-            "python_full_version": f"{py_version}.0",
-            "python_version": py_version,
-        }
-        extra_env = base_env.copy()
-        extra_env["extra"] = hw_extra
-
         if req.marker is None or req.marker.evaluate(base_env):
             # no marker or no optional requirement
             base[req.name] = req
         elif req.marker.evaluate(extra_env):
             # matching optional requirement
             hw[req.name] = req
+    
+    return base, hw
 
+
+def _check_version_conflicts(
+    base: dict[str, Requirement], hw: dict[str, Requirement]
+) -> None:
+    """Check for version conflicts between base and hardware requirements."""
     for name, hwreq in hw.items():
         basereq = base.get(name)
         if basereq is None:
             continue
+        
         for specifier in hwreq.specifier:
             # naive check for common version conflicts
             # allow pre-releases for Gaudi
@@ -79,11 +92,28 @@ def test_package_conflict(py_version: str, hw_extra: str) -> None:
                     version, prereleases=version.is_prerelease
                 ), (basereq, hwreq)
 
-    # verify special cases against base requirements
-    if hw_extra in EXTRA_CHECKS:
-        for name, basereq in base.items():
-            extra_check = EXTRA_CHECKS[hw_extra].get(name)
-            if extra_check is not None:
-                assert basereq.specifier.contains(
-                    extra_check, prereleases=extra_check.is_prerelease
-                ), (basereq, extra_check)
+
+def _verify_extra_checks(
+    hw_extra: str, base: dict[str, Requirement]
+) -> None:
+    """Verify special cases against base requirements."""
+    if hw_extra not in EXTRA_CHECKS:
+        return
+    
+    for name, basereq in base.items():
+        extra_check = EXTRA_CHECKS[hw_extra].get(name)
+        if extra_check is not None:
+            assert basereq.specifier.contains(
+                extra_check, prereleases=extra_check.is_prerelease
+            ), (basereq, extra_check)
+
+
+@pytest.mark.parametrize("hw_extra", sorted(HW_EXTRAS))
+@pytest.mark.parametrize("py_version", ["3.10", "3.11"])
+def test_package_conflict(py_version: str, hw_extra: str) -> None:
+    if py_version != "3.11" and hw_extra == "hpu":
+        pytest.skip("Intel Gaudi only supports 3.11")
+
+    base, hw = _categorize_requirements(py_version, hw_extra)
+    _check_version_conflicts(base, hw)
+    _verify_extra_checks(hw_extra, base)
